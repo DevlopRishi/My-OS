@@ -1,0 +1,404 @@
+/* 
+ * SimpleOS - A minimal operating system with basic features
+ * Components:
+ * 1. Bootloader (boot.asm)
+ * 2. Kernel (kernel.c)
+ * 3. File System (fs.c)
+ * 4. CLI Interface (cli.c)
+ * 5. GUI Interface (gui.c)
+ * 6. Python Interpreter Support (python_support.c)
+ */
+
+/************************
+ * boot.asm - Bootloader
+ ************************/
+
+/* 
+ * This file contains the assembly code that gets executed at boot time.
+ * It sets up the environment and loads the kernel from disk.
+ */
+
+```nasm
+; boot.asm
+[BITS 16]                       ; 16-bit mode
+[ORG 0x7C00]                    ; Boot sector origin
+
+; Jump past data
+jmp start
+nop
+
+; BIOS Parameter Block (BPB) for FAT16
+OEMLabel        db "SimpleOS "  ; 8 bytes
+BytesPerSector  dw 512
+SectorsPerCluster db 1
+ReservedSectors dw 1
+NumFATs         db 2
+RootEntries     dw 224
+TotalSectors    dw 2880         ; 1.44MB floppy
+MediaType       db 0xF0         ; 3.5" floppy
+SectorsPerFAT   dw 9
+SectorsPerTrack dw 18
+NumHeads        dw 2
+HiddenSectors   dd 0
+TotalSectorsBig dd 0
+DriveNumber     db 0            ; Floppy drive
+Reserved        db 0
+Signature       db 0x29
+VolumeID        dd 0x12345678
+VolumeLabel     db "SIMPLE OS  " ; 11 bytes
+FileSystem      db "FAT16   "    ; 8 bytes
+
+start:
+    ; Setup segments and stack
+    cli                         ; Disable interrupts
+    mov ax, 0x0000              ; Set segments to 0
+    mov ds, ax
+    mov es, ax
+    mov ss, ax
+    mov sp, 0x7C00              ; Set stack below bootloader
+    sti                         ; Enable interrupts
+
+    ; Display boot message
+    mov si, BootMessage
+    call PrintString
+
+    ; Load kernel from disk
+    mov si, LoadingMessage
+    call PrintString
+
+    ; Reset disk system
+    mov ah, 0
+    int 0x13
+
+    ; Load kernel (first track after boot sector)
+    mov ax, 0x1000              ; Load kernel at 0x1000:0
+    mov es, ax
+    mov bx, 0                   ; Offset 0
+    mov ah, 2                   ; Read sectors function
+    mov al, 63                  ; Read 63 sectors (max for first track)
+    mov ch, 0                   ; Cylinder 0
+    mov cl, 2                   ; Start from sector 2 (after boot sector)
+    mov dh, 0                   ; Head 0
+    mov dl, [DriveNumber]       ; Drive number
+    int 0x13                    ; Call BIOS
+    jc DiskError                ; Jump if error (carry flag set)
+
+    ; Load second part of kernel (head 1)
+    mov ax, 0x2000              ; Load at 0x2000:0
+    mov es, ax
+    mov bx, 0                   ; Offset 0
+    mov ah, 2                   ; Read sectors function
+    mov al, 63                  ; Read 63 sectors
+    mov ch, 0                   ; Cylinder 0
+    mov cl, 1                   ; Start from sector 1
+    mov dh, 1                   ; Head 1
+    mov dl, [DriveNumber]       ; Drive number
+    int 0x13                    ; Call BIOS
+    jc DiskError                ; Jump if error
+
+    ; Success message
+    mov si, SuccessMessage
+    call PrintString
+
+    ; Enable A20 line
+    call EnableA20
+
+    ; Switch to protected mode
+    cli                         ; Disable interrupts
+    lgdt [GDTDesc]              ; Load GDT descriptor
+    mov eax, cr0
+    or eax, 1                   ; Set protected mode bit
+    mov cr0, eax
+    jmp 0x08:ProtectedMode      ; Far jump to protected mode code
+
+DiskError:
+    mov si, DiskErrorMessage
+    call PrintString
+    jmp $                       ; Hang
+
+; Print string function
+PrintString:
+    lodsb                       ; Load byte at SI into AL and increment SI
+    or al, al                   ; Check if AL is 0 (end of string)
+    jz PrintDone                ; If yes, we're done
+    mov ah, 0x0E                ; BIOS teletype function
+    int 0x10                    ; Call BIOS
+    jmp PrintString             ; Repeat for next character
+PrintDone:
+    ret
+
+; Enable A20 line (Fast A20 method)
+EnableA20:
+    in al, 0x92                 ; Read System Control Port A
+    or al, 2                    ; Set A20 bit
+    out 0x92, al                ; Write back
+    ret
+
+; Strings
+BootMessage     db "SimpleOS Bootloader v1.0", 0x0D, 0x0A, 0
+LoadingMessage  db "Loading kernel...", 0x0D, 0x0A, 0
+DiskErrorMessage db "Error loading kernel!", 0x0D, 0x0A, 0
+SuccessMessage  db "Kernel loaded, switching to protected mode...", 0x0D, 0x0A, 0
+
+; GDT (Global Descriptor Table)
+GDT:
+    ; Null descriptor
+    dw 0, 0, 0, 0               ; 8 bytes of zeros
+
+    ; Code segment descriptor
+    dw 0xFFFF                   ; Limit (bits 0-15)
+    dw 0                        ; Base (bits 0-15)
+    db 0                        ; Base (bits 16-23)
+    db 0x9A                     ; Access byte: Present, Ring 0, Code, Execute/Read
+    db 0xCF                     ; Flags + Limit (bits 16-19): 4KB pages, 32-bit protected mode
+    db 0                        ; Base (bits 24-31)
+
+    ; Data segment descriptor
+    dw 0xFFFF                   ; Limit (bits 0-15)
+    dw 0                        ; Base (bits 0-15)
+    db 0                        ; Base (bits 16-23)
+    db 0x92                     ; Access byte: Present, Ring 0, Data, Read/Write
+    db 0xCF                     ; Flags + Limit (bits 16-19): 4KB pages, 32-bit protected mode
+    db 0                        ; Base (bits 24-31)
+
+GDTDesc:
+    dw GDTDesc - GDT - 1        ; Size of GDT
+    dd GDT                      ; Address of GDT
+
+[BITS 32]                       ; 32-bit code
+ProtectedMode:
+    ; Set up segment registers
+    mov ax, 0x10                ; Data segment selector
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ss, ax
+    mov esp, 0x90000            ; Set stack pointer
+    
+    ; Jump to kernel
+    jmp 0x08:0x10000            ; Far jump to kernel entry point
+
+; Pad to 510 bytes and add boot signature
+times 510-($-$$) db 0
+dw 0xAA55                       ; Boot signature
+```
+
+/************************
+ * kernel.c - Main kernel
+ ************************/
+
+/**
+ * This is the main kernel file that gets loaded by the bootloader
+ * and initializes the system components.
+ */
+
+#include <stdint.h>
+#include <stdbool.h>
+
+// Forward declarations for other components
+extern void init_filesystem();
+extern void init_cli();
+extern void init_gui();
+extern void init_python_support();
+
+// Memory-mapped I/O addresses
+#define VGA_MEMORY 0xB8000            // VGA text mode buffer
+#define VGA_WIDTH 80                  // Console width
+#define VGA_HEIGHT 25                 // Console height
+
+// System state
+typedef enum {
+    SYSTEM_BOOTING,
+    SYSTEM_RUNNING_CLI,
+    SYSTEM_RUNNING_GUI,
+    SYSTEM_SHUTDOWN
+} system_state_t;
+
+system_state_t current_state = SYSTEM_BOOTING;
+
+// Text mode colors
+typedef enum {
+    VGA_COLOR_BLACK = 0,
+    VGA_COLOR_BLUE = 1,
+    VGA_COLOR_GREEN = 2,
+    VGA_COLOR_CYAN = 3,
+    VGA_COLOR_RED = 4,
+    VGA_COLOR_MAGENTA = 5,
+    VGA_COLOR_BROWN = 6,
+    VGA_COLOR_LIGHT_GREY = 7,
+    VGA_COLOR_DARK_GREY = 8,
+    VGA_COLOR_LIGHT_BLUE = 9,
+    VGA_COLOR_LIGHT_GREEN = 10,
+    VGA_COLOR_LIGHT_CYAN = 11,
+    VGA_COLOR_LIGHT_RED = 12,
+    VGA_COLOR_LIGHT_MAGENTA = 13,
+    VGA_COLOR_LIGHT_BROWN = 14,
+    VGA_COLOR_WHITE = 15
+} vga_color_t;
+
+// VGA entry (character + attribute)
+uint16_t* const vga_buffer = (uint16_t*) VGA_MEMORY;
+uint8_t terminal_color = VGA_COLOR_WHITE | (VGA_COLOR_BLUE << 4);  // White on blue
+int cursor_x = 0;
+int cursor_y = 0;
+
+// I/O port functions
+static inline void outb(uint16_t port, uint8_t value) {
+    asm volatile ("outb %0, %1" : : "a"(value), "Nd"(port));
+}
+
+static inline uint8_t inb(uint16_t port) {
+    uint8_t ret;
+    asm volatile ("inb %1, %0" : "=a"(ret) : "Nd"(port));
+    return ret;
+}
+
+// Create a VGA entry (character + attribute)
+uint16_t vga_entry(unsigned char c, uint8_t color) {
+    return (uint16_t) c | (uint16_t) color << 8;
+}
+
+// Update hardware cursor position
+void update_cursor() {
+    uint16_t pos = cursor_y * VGA_WIDTH + cursor_x;
+    outb(0x3D4, 0x0F);
+    outb(0x3D5, (uint8_t) (pos & 0xFF));
+    outb(0x3D4, 0x0E);
+    outb(0x3D5, (uint8_t) ((pos >> 8) & 0xFF));
+}
+
+// Clear screen
+void clear_screen() {
+    for (int y = 0; y < VGA_HEIGHT; y++) {
+        for (int x = 0; x < VGA_WIDTH; x++) {
+            vga_buffer[y * VGA_WIDTH + x] = vga_entry(' ', terminal_color);
+        }
+    }
+    cursor_x = 0;
+    cursor_y = 0;
+    update_cursor();
+}
+
+// Put a character on screen
+void putchar(char c) {
+    if (c == '\n') {
+        cursor_x = 0;
+        cursor_y++;
+    } else if (c == '\r') {
+        cursor_x = 0;
+    } else if (c == '\b') {
+        if (cursor_x > 0) {
+            cursor_x--;
+            vga_buffer[cursor_y * VGA_WIDTH + cursor_x] = vga_entry(' ', terminal_color);
+        }
+    } else if (c == '\t') {
+        // Tab - move to next multiple of 8
+        cursor_x = (cursor_x + 8) & ~7;
+    } else {
+        vga_buffer[cursor_y * VGA_WIDTH + cursor_x] = vga_entry(c, terminal_color);
+        cursor_x++;
+    }
+    
+    // Handle line wrapping
+    if (cursor_x >= VGA_WIDTH) {
+        cursor_x = 0;
+        cursor_y++;
+    }
+    
+    // Handle scrolling
+    if (cursor_y >= VGA_HEIGHT) {
+        // Move all lines up one line
+        for (int y = 0; y < VGA_HEIGHT - 1; y++) {
+            for (int x = 0; x < VGA_WIDTH; x++) {
+                vga_buffer[y * VGA_WIDTH + x] = vga_buffer[(y + 1) * VGA_WIDTH + x];
+            }
+        }
+        
+        // Clear the last line
+        for (int x = 0; x < VGA_WIDTH; x++) {
+            vga_buffer[(VGA_HEIGHT - 1) * VGA_WIDTH + x] = vga_entry(' ', terminal_color);
+        }
+        
+        cursor_y = VGA_HEIGHT - 1;
+    }
+    
+    update_cursor();
+}
+
+// Print a string
+void print(const char* str) {
+    for (int i = 0; str[i] != '\0'; i++) {
+        putchar(str[i]);
+    }
+}
+
+// Print an integer
+void print_int(int num) {
+    char buffer[16];
+    int i = 0;
+    bool is_negative = false;
+    
+    if (num == 0) {
+        putchar('0');
+        return;
+    }
+    
+    if (num < 0) {
+        is_negative = true;
+        num = -num;
+    }
+    
+    while (num > 0) {
+        buffer[i++] = '0' + (num % 10);
+        num /= 10;
+    }
+    
+    if (is_negative) {
+        putchar('-');
+    }
+    
+    while (i > 0) {
+        putchar(buffer[--i]);
+    }
+}
+
+// Boot animation - progress bar
+void boot_progress(int progress) {
+    // Clear the line
+    cursor_x = 0;
+    cursor_y = 12;
+    for (int x = 0; x < VGA_WIDTH; x++) {
+        vga_buffer[cursor_y * VGA_WIDTH + x] = vga_entry(' ', terminal_color);
+    }
+    
+    // Draw progress bar
+    int bar_width = (VGA_WIDTH - 20) * progress / 100;
+    cursor_x = 10;
+    print("[");
+    cursor_x = 11;
+    for (int i = 0; i < VGA_WIDTH - 20; i++) {
+        if (i < bar_width) {
+            putchar('=');
+        } else {
+            putchar(' ');
+        }
+    }
+    cursor_x = VGA_WIDTH - 10;
+    print("]");
+    
+    // Print percentage
+    cursor_x = VGA_WIDTH / 2 - 2;
+    cursor_y = 13;
+    print_int(progress);
+    print("%");
+    
+    // Wait a bit to show progress
+    for (volatile int i = 0; i < 5000000; i++) {}
+}
+
+// Basic keyboard input
+char getchar() {
+    uint8_t scancode;
+    
+    // Wait for key press
